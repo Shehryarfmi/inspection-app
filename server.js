@@ -8,7 +8,7 @@ const bcrypt = require("bcrypt");
 
 const app = express();
 
-/* ---------- SESSION ---------- */
+/* ---------------- SESSION ---------------- */
 app.use(
   session({
     secret: "inspection-secret-key",
@@ -17,17 +17,17 @@ app.use(
   })
 );
 
-/* ---------- MIDDLEWARE ---------- */
+/* ---------------- MIDDLEWARE ---------------- */
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 app.use("/uploads", express.static("uploads"));
 
-/* ---------- FOLDERS ---------- */
-["uploads"].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+/* ---------------- FOLDERS ---------------- */
+["uploads"].forEach((d) => {
+  if (!fs.existsSync(d)) fs.mkdirSync(d);
 });
 
-/* ---------- DATABASE ---------- */
+/* ---------------- DATABASE ---------------- */
 const db = new sqlite3.Database(path.join(__dirname, "app.db"));
 
 db.serialize(() => {
@@ -44,18 +44,31 @@ db.serialize(() => {
     landlord_email TEXT,
     tenant_email TEXT
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS inspections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    property_id INTEGER,
+    title TEXT,
+    summary TEXT
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inspection_id INTEGER,
+    room TEXT,
+    filename TEXT,
+    comment TEXT
+  )`);
 });
 
-/* ---------- SAFE DEMO USERS ---------- */
-const users = [
+/* ---------------- DEMO USERS (SAFE) ---------------- */
+[
   ["admin@demo.com", "admin123", "admin"],
   ["landlord@demo.com", "landlord123", "landlord"],
   ["tenant@demo.com", "tenant123", "tenant"],
-  ["inspector@demo.com", "inspector123", "inspector"]
-];
-
-users.forEach(u => {
-  bcrypt.hash(u[1], 10, (e, hash) => {
+  ["inspector@demo.com", "inspector123", "inspector"],
+].forEach((u) => {
+  bcrypt.hash(u[1], 10, (_, hash) => {
     db.run(
       "INSERT OR IGNORE INTO users(email,password,role) VALUES(?,?,?)",
       [u[0], hash, u[2]]
@@ -63,73 +76,93 @@ users.forEach(u => {
   });
 });
 
-/* ---------- HELPERS ---------- */
-function requireLogin(req, res, next) {
-  if (!req.session.user) return res.redirect("/login");
-  next();
-}
+/* ---------------- UPLOAD ---------------- */
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: "uploads",
+    filename: (_, file, cb) =>
+      cb(null, Date.now() + path.extname(file.originalname)),
+  }),
+});
 
-function esc(s) {
-  return String(s || "").replace(/[&<>"']/g, m =>
-    ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[m])
+/* ---------------- HELPERS ---------------- */
+const esc = (s) =>
+  String(s || "").replace(/[&<>"']/g, (m) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m])
   );
-}
 
-/* ---------- LOGIN ---------- */
-app.get("/login", (req, res) => {
+const requireLogin = (req, res, next) =>
+  req.session.user ? next() : res.redirect("/login");
+
+/* ---------------- LOGIN ---------------- */
+app.get("/login", (_, res) => {
   res.send(`
-  <h2>Property Management System</h2>
-  <form method="POST">
-    <input name="email" placeholder="Email" required />
-    <input type="password" name="password" placeholder="Password" required />
-    <button>Login</button>
-  </form>
-  `);
+<link rel="stylesheet" href="/style.css">
+<div class="box">
+<h2>Property Management System</h2>
+<form method="POST">
+<input name="email" placeholder="Email" required>
+<input type="password" name="password" placeholder="Password" required>
+<button>Login</button>
+</form>
+</div>
+`);
 });
 
 app.post("/login", (req, res) => {
-  const { email, password } = req.body;
-  db.get("SELECT * FROM users WHERE email=?", [email], (e, user) => {
-    if (!user) return res.send("Invalid login");
-    bcrypt.compare(password, user.password, (e2, ok) => {
-      if (!ok) return res.send("Invalid login");
-      req.session.user = user;
-      res.redirect("/");
-    });
-  });
+  db.get(
+    "SELECT * FROM users WHERE email=?",
+    [req.body.email],
+    (_, user) => {
+      if (!user) return res.send("Invalid login");
+      bcrypt.compare(req.body.password, user.password, (_, ok) => {
+        if (!ok) return res.send("Invalid login");
+        req.session.user = user;
+        res.redirect("/");
+      });
+    }
+  );
 });
 
-app.get("/logout", (req, res) => {
-  req.session.destroy(() => res.redirect("/login"));
-});
+app.get("/logout", (req, res) =>
+  req.session.destroy(() => res.redirect("/login"))
+);
 
-/* ---------- DASHBOARD ---------- */
+/* ---------------- DASHBOARD ---------------- */
 app.get("/", requireLogin, (req, res) => {
-  db.all("SELECT * FROM properties", (e, rows) => {
-    let html = `<h2>Welcome ${esc(req.session.user.role)}</h2>
-    <a href="/logout">Logout</a><hr/>`;
+  db.all("SELECT * FROM properties", (_, rows) => {
+    let html = `
+<link rel="stylesheet" href="/style.css">
+<div class="box">
+<h2>Dashboard (${esc(req.session.user.role)})</h2>
+<a href="/logout">Logout</a><hr>
+`;
 
     if (req.session.user.role !== "tenant") {
       html += `
-      <form method="POST" action="/add-property">
-        <input name="address" placeholder="Property Address" required />
-        <input name="landlord_email" placeholder="Landlord Email" required />
-        <input name="tenant_email" placeholder="Tenant Email" />
-        <button>Add Property</button>
-      </form><hr/>`;
+<form method="POST" action="/add-property">
+<input name="address" placeholder="Address" required>
+<input name="landlord_email" placeholder="Landlord Email" required>
+<input name="tenant_email" placeholder="Tenant Email">
+<button>Add Property</button>
+</form><hr>
+`;
     }
 
-    rows.forEach(p => {
+    rows.forEach((p) => {
       if (
         req.session.user.role === "admin" ||
         p.landlord_email === req.session.user.email ||
         p.tenant_email === req.session.user.email
       ) {
-        html += `<div><b>${esc(p.address)}</b></div>`;
+        html += `<div class="card">
+<b>${esc(p.address)}</b><br>
+<a href="/property/${p.id}">Open</a>
+</div>`;
       }
     });
 
-    res.send(html);
+    res.send(html + "</div>");
   });
 });
 
@@ -141,8 +174,95 @@ app.post("/add-property", requireLogin, (req, res) => {
   );
 });
 
-/* ---------- SERVER ---------- */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+/* ---------------- PROPERTY ---------------- */
+app.get("/property/:id", requireLogin, (req, res) => {
+  db.get(
+    "SELECT * FROM properties WHERE id=?",
+    [req.params.id],
+    (_, p) => {
+      db.all(
+        "SELECT * FROM inspections WHERE property_id=?",
+        [p.id],
+        (_, ins) => {
+          let html = `
+<link rel="stylesheet" href="/style.css">
+<div class="box">
+<h3>${esc(p.address)}</h3>
+<form method="POST" action="/add-inspection/${p.id}">
+<input name="title" placeholder="Inspection title" required>
+<textarea name="summary" placeholder="Summary"></textarea>
+<button>Add Inspection</button>
+</form><hr>
+`;
+          ins.forEach(
+            (i) =>
+              (html += `<div class="card">
+${esc(i.title)} <a href="/inspection/${i.id}">Open</a>
+</div>`)
+          );
+          res.send(html + "</div>");
+        }
+      );
+    }
+  );
 });
+
+app.post("/add-inspection/:pid", requireLogin, (req, res) => {
+  db.run(
+    "INSERT INTO inspections(property_id,title,summary) VALUES(?,?,?)",
+    [req.params.pid, req.body.title, req.body.summary],
+    () => res.redirect(`/property/${req.params.pid}`)
+  );
+});
+
+/* ---------------- INSPECTION ---------------- */
+app.get("/inspection/:id", requireLogin, (req, res) => {
+  db.all(
+    "SELECT * FROM photos WHERE inspection_id=?",
+    [req.params.id],
+    (_, photos) => {
+      let html = `
+<link rel="stylesheet" href="/style.css">
+<div class="box">
+<h3>Add Photo</h3>
+<form method="POST" enctype="multipart/form-data" action="/add-photo/${req.params.id}">
+<input name="room" placeholder="Room" required>
+<input type="file" name="photo" required>
+<input name="comment" placeholder="Comment">
+<button>Upload</button>
+</form><hr>
+`;
+      photos.forEach(
+        (p) =>
+          (html += `<img src="/uploads/${p.filename}" width="200"><br>${esc(
+            p.comment
+          )}<br><br>`)
+      );
+      res.send(html + "</div>");
+    }
+  );
+});
+
+app.post(
+  "/add-photo/:id",
+  requireLogin,
+  upload.single("photo"),
+  (req, res) => {
+    db.run(
+      "INSERT INTO photos(inspection_id,room,filename,comment) VALUES(?,?,?,?)",
+      [
+        req.params.id,
+        req.body.room,
+        req.file.filename,
+        req.body.comment,
+      ],
+      () => res.redirect(`/inspection/${req.params.id}`)
+    );
+  }
+);
+
+/* ---------------- SERVER ---------------- */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () =>
+  console.log("Server running on port", PORT)
+);
